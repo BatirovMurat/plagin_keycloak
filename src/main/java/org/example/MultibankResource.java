@@ -27,6 +27,9 @@ public class MultibankResource {
     
     @Context
     private UriInfo uriInfo;
+    
+    @Context
+    private HttpHeaders headers;
     // TTL для OTP в секундах (подставь свой)
     private static final int OTP_TTL_SECONDS = 300;
 
@@ -418,9 +421,8 @@ public class MultibankResource {
             throw new Exception("Client not found");
         }
 
-        // 2. Устанавливаем клиент и URI в контекст (ключевое исправление!)
+        // 2. Устанавливаем клиент в контекст
         session.getContext().setClient(client);
-        session.getContext().setUri(uriInfo);
 
         // 3. Создаем пользовательскую сессию
         UserSessionModel userSession = session.sessions().createUserSession(
@@ -429,7 +431,7 @@ public class MultibankResource {
                 user,
                 user.getUsername(),
                 session.getContext().getConnection().getRemoteAddr(),
-                "ECDSA-auth",
+                "signature-auth",
                 false,
                 null,
                 null,
@@ -442,6 +444,9 @@ public class MultibankResource {
                 client,
                 userSession
         );
+        
+        // Устанавливаем действие аутентификации
+        clientSession.setAction("signature-auth");
 
         // 5. Создаем ClientSessionContext
         Set<String> scopeParam = new HashSet<>(Arrays.asList("openid", "profile", "email"));
@@ -451,16 +456,19 @@ public class MultibankResource {
                 session
         );
 
-        // 6. Инициализируем TokenManager и EventBuilder
+        // 6. Инициализируем TokenManager и EventBuilder с URI
         TokenManager tokenManager = new TokenManager();
         EventBuilder event = new EventBuilder(realm, session, session.getContext().getConnection());
+        event.detail("auth_method", "signature-auth");
 
-        // 7. Генерируем токены
-        return tokenManager
+        // 7. Генерируем токены с правильным контекстом
+        AccessTokenResponse response = tokenManager
                 .responseBuilder(realm, client, event, session, userSession, clientSessionCtx)
                 .generateAccessToken()
-                .generateRefreshToken() // Добавляем refresh token
+                .generateRefreshToken()
                 .build();
+        
+        return response;
     }
 
     static String generateUsername(String firstName, String lastName) {
