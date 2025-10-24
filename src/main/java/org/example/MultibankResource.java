@@ -6,11 +6,14 @@ import org.example.config.RealmConfigResolver;
 import org.example.eimzo.EIMZOServerService;
 import org.example.logger.TelegramLogger;
 import org.example.sms.SmsService;
+import org.keycloak.common.ClientConnection;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.models.*;
 import org.keycloak.representations.AccessTokenResponse;
 import org.keycloak.protocol.oidc.TokenManager;
+import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.util.DefaultClientSessionContext;
+import org.keycloak.urls.UrlType;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -415,7 +418,7 @@ public class MultibankResource {
     private AccessTokenResponse issueTokens(UserModel user) throws Exception {
         RealmModel realm = session.getContext().getRealm();
 
-        // 1. Получаем клиента (убедитесь, что clientId существует)
+        // 1. Получаем клиента
         ClientModel client = realm.getClientByClientId(clientId);
         if (client == null) {
             throw new Exception("Client not found");
@@ -424,13 +427,33 @@ public class MultibankResource {
         // 2. Устанавливаем клиент в контекст
         session.getContext().setClient(client);
 
-        // 3. Создаем пользовательскую сессию
+        // 3. Логируем информацию об issuer для отладки
+        try {
+            String issuerUrl = session.getContext().getUri() != null 
+                ? session.getContext().getUri().getBaseUri().toString()
+                : "URI context is null";
+            System.out.println("Current URI context: " + issuerUrl);
+            System.out.println("Realm name: " + realm.getName());
+            
+            // Получаем правильный issuer URL для realm
+            String realmIssuer = session.getContext().getUri() != null
+                ? session.getContext().getUri().getBaseUri().toString() + "realms/" + realm.getName()
+                : null;
+            System.out.println("Expected realm issuer: " + realmIssuer);
+        } catch (Exception e) {
+            System.out.println("Error getting URI info: " + e.getMessage());
+        }
+
+        // 4. Создаем пользовательскую сессию
+        ClientConnection connection = session.getContext().getConnection();
+        String ipAddress = connection != null ? connection.getRemoteAddr() : "unknown";
+        
         UserSessionModel userSession = session.sessions().createUserSession(
-                UUID.randomUUID().toString(), // Явный ID сессии
+                UUID.randomUUID().toString(),
                 realm,
                 user,
                 user.getUsername(),
-                session.getContext().getConnection().getRemoteAddr(),
+                ipAddress,
                 "signature-auth",
                 false,
                 null,
@@ -438,35 +461,44 @@ public class MultibankResource {
                 UserSessionModel.SessionPersistenceState.PERSISTENT
         );
 
-        // 4. Создаем клиентскую сессию
+        // 5. Создаем клиентскую сессию
         AuthenticatedClientSessionModel clientSession = session.sessions().createClientSession(
                 realm,
                 client,
                 userSession
         );
         
-        // Устанавливаем действие аутентификации
-        clientSession.setAction("signature-auth");
+        // Устанавливаем redirect URI
+        if (client.getRootUrl() != null && !client.getRootUrl().isEmpty()) {
+            clientSession.setRedirectUri(client.getRootUrl());
+        }
 
-        // 5. Создаем ClientSessionContext
-        Set<String> scopeParam = new HashSet<>(Arrays.asList("openid", "profile", "email"));
+        // 6. Создаем ClientSessionContext с правильными скоупами
+        String scopeString = "openid profile email";
         ClientSessionContext clientSessionCtx = DefaultClientSessionContext.fromClientSessionAndScopeParameter(
                 clientSession,
-                scopeParam.toString(),
+                scopeString,
                 session
         );
 
-        // 6. Инициализируем TokenManager и EventBuilder с URI
-        TokenManager tokenManager = new TokenManager();
-        EventBuilder event = new EventBuilder(realm, session, session.getContext().getConnection());
-        event.detail("auth_method", "signature-auth");
+        // 7. Создаем EventBuilder
+        EventBuilder event = new EventBuilder(realm, session, connection);
+        event.detail("auth_method", "signature-auth")
+             .detail("username", user.getUsername())
+             .detail("client_id", clientId);
 
-        // 7. Генерируем токены с правильным контекстом
+        // 8. Генерируем токены через TokenManager
+        TokenManager tokenManager = new TokenManager();
         AccessTokenResponse response = tokenManager
                 .responseBuilder(realm, client, event, session, userSession, clientSessionCtx)
                 .generateAccessToken()
                 .generateRefreshToken()
+                .generateIDToken()
                 .build();
+        
+        System.out.println("Token generated successfully");
+        TelegramLogger.sendMessage("Token issuer should be: " + 
+            (session.getContext().getUri() != null ? session.getContext().getUri().getBaseUri() : "unknown"));
         
         return response;
     }
