@@ -24,6 +24,9 @@ public class MultibankResource {
     private final KeycloakSession session;
     private String clientId;
     private String clientSecret;
+    
+    @Context
+    private UriInfo uriInfo;
     // TTL для OTP в секундах (подставь свой)
     private static final int OTP_TTL_SECONDS = 300;
 
@@ -415,8 +418,9 @@ public class MultibankResource {
             throw new Exception("Client not found");
         }
 
-        // 2. Устанавливаем клиент в контекст (ключевое исправление!)
+        // 2. Устанавливаем клиент и URI в контекст (ключевое исправление!)
         session.getContext().setClient(client);
+        session.getContext().setUri(uriInfo);
 
         // 3. Создаем пользовательскую сессию
         UserSessionModel userSession = session.sessions().createUserSession(
