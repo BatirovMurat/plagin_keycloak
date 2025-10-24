@@ -2,6 +2,7 @@ package org.example;
 
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.services.resource.RealmResourceProvider;
+
 public class MultibankEndpointProvider implements RealmResourceProvider {
 
     private final KeycloakSession session;

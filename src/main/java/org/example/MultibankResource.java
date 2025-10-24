@@ -6,18 +6,26 @@ import org.example.config.RealmConfigResolver;
 import org.example.eimzo.EIMZOServerService;
 import org.example.logger.TelegramLogger;
 import org.example.sms.SmsService;
+import org.keycloak.common.ClientConnection;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.models.*;
 import org.keycloak.representations.AccessTokenResponse;
 import org.keycloak.protocol.oidc.TokenManager;
+import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.util.DefaultClientSessionContext;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.services.managers.ClientSessionCode;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
+import org.keycloak.services.managers.AuthenticationSessionManager;
+import org.keycloak.sessions.AuthenticationSessionModel;
+import org.keycloak.sessions.RootAuthenticationSessionModel;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatterBuilder;
-
 import java.util.*;
+import java.util.Base64;
 
 @Path("/")
 public class MultibankResource {
@@ -409,54 +417,107 @@ public class MultibankResource {
     private AccessTokenResponse issueTokens(UserModel user) throws Exception {
         RealmModel realm = session.getContext().getRealm();
 
-        // 1. Получаем клиента (убедитесь, что clientId существует)
+        // 1. Получаем клиента
         ClientModel client = realm.getClientByClientId(clientId);
         if (client == null) {
             throw new Exception("Client not found");
         }
 
-        // 2. Устанавливаем клиент в контекст (ключевое исправление!)
+        // 2. Устанавливаем клиент в контекст
         session.getContext().setClient(client);
 
-        // 3. Создаем пользовательскую сессию
+        // 3. Проверяем URI контекст и логируем
+        if (session.getContext().getUri() != null) {
+            String issuerUrl = session.getContext().getUri().getBaseUri().toString();
+            String realmIssuer = issuerUrl + "realms/" + realm.getName();
+            System.out.println("URI context available. Issuer: " + realmIssuer);
+            TelegramLogger.sendMessage("Issuer URL: " + realmIssuer);
+        } else {
+            System.out.println("WARNING: URI context is null!");
+            TelegramLogger.sendMessage("WARNING: URI context is null! Tokens may have wrong issuer.");
+        }
+
+        // 4. Создаем пользовательскую сессию
+        ClientConnection connection = session.getContext().getConnection();
+        String ipAddress = connection != null ? connection.getRemoteAddr() : "unknown";
+        
         UserSessionModel userSession = session.sessions().createUserSession(
-                UUID.randomUUID().toString(), // Явный ID сессии
+                KeycloakModelUtils.generateId(),
                 realm,
                 user,
                 user.getUsername(),
-                session.getContext().getConnection().getRemoteAddr(),
-                "ECDSA-auth",
+                ipAddress,
+                "signature-auth",
                 false,
                 null,
                 null,
                 UserSessionModel.SessionPersistenceState.PERSISTENT
         );
 
-        // 4. Создаем клиентскую сессию
+        // 5. Создаем клиентскую сессию
         AuthenticatedClientSessionModel clientSession = session.sessions().createClientSession(
                 realm,
                 client,
                 userSession
         );
+        
+        // Устанавливаем redirect URI
+        if (client.getRootUrl() != null && !client.getRootUrl().isEmpty()) {
+            clientSession.setRedirectUri(client.getRootUrl());
+        } else {
+            clientSession.setRedirectUri("http://localhost:8080");
+        }
+        
+        // Устанавливаем протокол
+        clientSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
 
-        // 5. Создаем ClientSessionContext
-        Set<String> scopeParam = new HashSet<>(Arrays.asList("openid", "profile", "email"));
+        // 6. Создаем ClientSessionContext с правильными скоупами
+        String scopeString = "openid profile email";
         ClientSessionContext clientSessionCtx = DefaultClientSessionContext.fromClientSessionAndScopeParameter(
                 clientSession,
-                scopeParam.toString(),
+                scopeString,
                 session
         );
 
-        // 6. Инициализируем TokenManager и EventBuilder
-        TokenManager tokenManager = new TokenManager();
-        EventBuilder event = new EventBuilder(realm, session, session.getContext().getConnection());
+        // 7. Создаем EventBuilder
+        EventBuilder event = new EventBuilder(realm, session, connection);
+        event.detail("auth_method", "signature-auth")
+             .detail("username", user.getUsername())
+             .detail("client_id", clientId);
 
-        // 7. Генерируем токены
-        return tokenManager
+        // 8. Генерируем токены через TokenManager
+        TokenManager tokenManager = new TokenManager();
+        AccessTokenResponse response = tokenManager
                 .responseBuilder(realm, client, event, session, userSession, clientSessionCtx)
                 .generateAccessToken()
-                .generateRefreshToken() // Добавляем refresh token
+                .generateRefreshToken()
+                .generateIDToken()
                 .build();
+        
+        // 9. Декодируем токен для проверки issuer
+        try {
+            String[] parts = response.getToken().split("\\.");
+            if (parts.length > 1) {
+                String payload = new String(Base64.getUrlDecoder().decode(parts[1]));
+                System.out.println("Generated token payload: " + payload);
+                TelegramLogger.sendMessage("Token payload: " + payload.substring(0, Math.min(200, payload.length())));
+                
+                // Ищем issuer в payload
+                if (payload.contains("\"iss\"")) {
+                    int issStart = payload.indexOf("\"iss\"");
+                    String issSection = payload.substring(issStart, Math.min(issStart + 100, payload.length()));
+                    System.out.println("Token issuer section: " + issSection);
+                    TelegramLogger.sendMessage("Issuer: " + issSection);
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("Could not decode token: " + e.getMessage());
+        }
+        
+        System.out.println("Token generated successfully");
+        TelegramLogger.sendMessage("Token generated successfully");
+        
+        return response;
     }
 
     static String generateUsername(String firstName, String lastName) {
