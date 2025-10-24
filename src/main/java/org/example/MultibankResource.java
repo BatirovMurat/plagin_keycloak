@@ -13,26 +13,25 @@ import org.keycloak.representations.AccessTokenResponse;
 import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.util.DefaultClientSessionContext;
-import org.keycloak.urls.UrlType;
+import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.services.managers.ClientSessionCode;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
+import org.keycloak.services.managers.AuthenticationSessionManager;
+import org.keycloak.sessions.AuthenticationSessionModel;
+import org.keycloak.sessions.RootAuthenticationSessionModel;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeFormatterBuilder;
-
 import java.util.*;
+import java.util.Base64;
 
 @Path("/")
 public class MultibankResource {
     private final KeycloakSession session;
     private String clientId;
     private String clientSecret;
-    
-    @Context
-    private UriInfo uriInfo;
-    
-    @Context
-    private HttpHeaders headers;
     // TTL для OTP в секундах (подставь свой)
     private static final int OTP_TTL_SECONDS = 300;
 
@@ -427,21 +426,15 @@ public class MultibankResource {
         // 2. Устанавливаем клиент в контекст
         session.getContext().setClient(client);
 
-        // 3. Логируем информацию об issuer для отладки
-        try {
-            String issuerUrl = session.getContext().getUri() != null 
-                ? session.getContext().getUri().getBaseUri().toString()
-                : "URI context is null";
-            System.out.println("Current URI context: " + issuerUrl);
-            System.out.println("Realm name: " + realm.getName());
-            
-            // Получаем правильный issuer URL для realm
-            String realmIssuer = session.getContext().getUri() != null
-                ? session.getContext().getUri().getBaseUri().toString() + "realms/" + realm.getName()
-                : null;
-            System.out.println("Expected realm issuer: " + realmIssuer);
-        } catch (Exception e) {
-            System.out.println("Error getting URI info: " + e.getMessage());
+        // 3. Проверяем URI контекст и логируем
+        if (session.getContext().getUri() != null) {
+            String issuerUrl = session.getContext().getUri().getBaseUri().toString();
+            String realmIssuer = issuerUrl + "realms/" + realm.getName();
+            System.out.println("URI context available. Issuer: " + realmIssuer);
+            TelegramLogger.sendMessage("Issuer URL: " + realmIssuer);
+        } else {
+            System.out.println("WARNING: URI context is null!");
+            TelegramLogger.sendMessage("WARNING: URI context is null! Tokens may have wrong issuer.");
         }
 
         // 4. Создаем пользовательскую сессию
@@ -449,7 +442,7 @@ public class MultibankResource {
         String ipAddress = connection != null ? connection.getRemoteAddr() : "unknown";
         
         UserSessionModel userSession = session.sessions().createUserSession(
-                UUID.randomUUID().toString(),
+                KeycloakModelUtils.generateId(),
                 realm,
                 user,
                 user.getUsername(),
@@ -471,7 +464,12 @@ public class MultibankResource {
         // Устанавливаем redirect URI
         if (client.getRootUrl() != null && !client.getRootUrl().isEmpty()) {
             clientSession.setRedirectUri(client.getRootUrl());
+        } else {
+            clientSession.setRedirectUri("http://localhost:8080");
         }
+        
+        // Устанавливаем протокол
+        clientSession.setProtocol(OIDCLoginProtocol.LOGIN_PROTOCOL);
 
         // 6. Создаем ClientSessionContext с правильными скоупами
         String scopeString = "openid profile email";
@@ -496,9 +494,28 @@ public class MultibankResource {
                 .generateIDToken()
                 .build();
         
+        // 9. Декодируем токен для проверки issuer
+        try {
+            String[] parts = response.getToken().split("\\.");
+            if (parts.length > 1) {
+                String payload = new String(Base64.getUrlDecoder().decode(parts[1]));
+                System.out.println("Generated token payload: " + payload);
+                TelegramLogger.sendMessage("Token payload: " + payload.substring(0, Math.min(200, payload.length())));
+                
+                // Ищем issuer в payload
+                if (payload.contains("\"iss\"")) {
+                    int issStart = payload.indexOf("\"iss\"");
+                    String issSection = payload.substring(issStart, Math.min(issStart + 100, payload.length()));
+                    System.out.println("Token issuer section: " + issSection);
+                    TelegramLogger.sendMessage("Issuer: " + issSection);
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("Could not decode token: " + e.getMessage());
+        }
+        
         System.out.println("Token generated successfully");
-        TelegramLogger.sendMessage("Token issuer should be: " + 
-            (session.getContext().getUri() != null ? session.getContext().getUri().getBaseUri() : "unknown"));
+        TelegramLogger.sendMessage("Token generated successfully");
         
         return response;
     }
